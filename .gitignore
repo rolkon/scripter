@@ -1,0 +1,14 @@
+# all media formats
+*.mov
+*.wav
+*.mp4
+*.mp3
+*.jpg
+*.raf
+
+# python notebook
+.ipynb_checkpoints/
+__pycache__/
+
+# Mac folder structure
+.DS_Store
