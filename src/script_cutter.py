@@ -1,6 +1,9 @@
 import sys
 from PySide6.QtCore import (
-    Slot, QUrl, Qt, QStringListModel
+    Slot, Signal, QUrl, Qt, QStringListModel, QObject, QModelIndex
+    )
+from PySide6.QtGui import (
+    QKeyEvent
     )
 from PySide6.QtWidgets import *
 from PySide6.QtMultimedia import (QAudio, QAudioOutput, QMediaFormat,
@@ -10,11 +13,16 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from utils import io_utils
 import numpy as np
 
+class SimpleSignal(QObject):
+    signal = Signal()
+
 # holds current script in various forms, script can be queried and edited
-class ScriptModel:
+class ScriptModel(QObject):
+
     def __init__(self):
         self._script_tble = None
         self._script_html = ''
+        self.scriptChanged = SimpleSignal()
 
     def _script_tble_to_html(self):
         self._script_html = ''
@@ -28,21 +36,35 @@ class ScriptModel:
 
         self._script_html.rstrip()
 
-    def _get_array_index_from_cursor(self):
-        pass
-
     def load_script(self, path):
         self._script_tble = np.loadtxt(path, delimiter=',', dtype=str)
         self._script_tble_to_html()
+        self.scriptChanged.signal.emit()
 
     def get_script_html(self):
         return self._script_html
 
-    def mark_word_at_cursor(self, curser_pos):
-        pass
+    def _get_tble_index_from_cursor(self, cursor_pos):
+        total_char_len = 0
+        for i, word in enumerate(self._script_tble[1:,0]):
+            word_start = total_char_len
+            word_end = total_char_len + len(word)
 
-    def mark_selection(self, curser_pos_1, cursor_pos_2):
-        pass
+            if cursor_pos >= word_start and cursor_pos <= word_end:
+                return i
+
+            total_char_len += len(word) + 1 #+1 to account for space
+
+        return len(self._script_tble)-2 #return last word index, -2 to account for header
+
+    def mark_selection(self, cursor_pos_1, cursor_pos_2):
+        if cursor_pos_2 > cursor_pos_1:
+            self.mark_selection(cursor_pos_2, cursor_pos_1)
+
+        index_start = self._get_tble_index_from_cursor(cursor_pos_1)
+        index_stop  = self._get_tble_index_from_cursor(cursor_pos_2)
+
+        print(self._script_tble[index_start+1:index_stop+2,0])
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +85,7 @@ class MainWindow(QMainWindow):
         self._files_model = QStringListModel()
 
         self._script_model = ScriptModel()
+        self._script_model.scriptChanged.signal.connect(self._script_change)
         # --
         
         # -- File management --
@@ -97,7 +120,7 @@ class MainWindow(QMainWindow):
         #self._script_editor.setHtml('Hello this is an <span style="background-color:rgba(255,200,0,0.4)">example</span> text.')
         #self._script_editor.setHtml('Hello this is an example text.')
         self._script_editor.setCursor(Qt.ArrowCursor)
-        self._script_editor.viewport().setCursor(Qt.ArrowCursor)
+        self._script_editor.viewport().setCursor(Qt.PointingHandCursor)
         self._sp_editor = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self._script_editor.setSizePolicy(self._sp_editor)
         self._script_editor.cursorPositionChanged.connect(self._script_cursor_change)
@@ -147,14 +170,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._window_main)
         # --
 
-    #@Slot(int)
+    @Slot(int)
     def _project_selection_change(self, index):
         #self._update_file_browser(index)
         selected_project = self._proj_tree.get_projects()[index]
         file_list = selected_project.get_media('video/mp4/raw').get_file_names()
         self._files_model.setStringList(file_list)
 
-    #@Slot(int)
+    @Slot(QModelIndex)
     def _file_selection_change(self, q_index):
         index = q_index.row()
 
@@ -170,18 +193,25 @@ class MainWindow(QMainWindow):
             script_path = script_media.get_file_paths()[index]
             self._script_model.load_script(script_path)
 
-            self._script_editor.setHtml(self._script_model.get_script_html())
+            #self._script_editor.setHtml(self._script_model.get_script_html())
 
             #workaround to get video player widget to show first frame of video
             self._player.play()
             self._player.pause()
 
+    @Slot()
     def _script_cursor_change(self):
         anchor = self._script_editor.textCursor().anchor()
         position = self._script_editor.textCursor().position()
 
         #print(anchor, position)
+        self._script_model.mark_selection(anchor, position)
 
+    @Slot()
+    def _script_change(self):
+        self._script_editor.setHtml(self._script_model.get_script_html())
+
+    @Slot(QKeyEvent)
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
             if self._player.playbackState() == QMediaPlayer.PlayingState:
