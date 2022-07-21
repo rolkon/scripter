@@ -3,7 +3,7 @@ from PySide6.QtCore import (
     Slot, Signal, QUrl, Qt, QStringListModel, QObject, QModelIndex
     )
 from PySide6.QtGui import (
-    QKeyEvent
+    QKeyEvent, QMouseEvent, QTextCursor
     )
 from PySide6.QtWidgets import *
 from PySide6.QtMultimedia import (QAudio, QAudioOutput, QMediaFormat,
@@ -25,19 +25,35 @@ class ScriptModel(QObject):
         self.scriptChanged = SimpleSignal()
 
     def _script_tble_to_html(self):
+        start_highlight = '<span style="background-color:rgba(255,200,0,0.4)">'
+        stop_highlight = '</span>'
+
         self._script_html = ''
 
         # empty scripts have no text
         if self._script_tble.ndim < 2:
             return
 
-        for word in self._script_tble[1:,0]:
-            self._script_html += word + ' '
+        for word, is_active in zip(self._script_tble[1:,0], self._script_tble[1:,4].astype(int)):
+            # toggle from inactive words to active words
+            if is_active:
+                self._script_html += start_highlight + word + stop_highlight + ' '
+            else:
+                self._script_html += word + ' '
 
         self._script_html.rstrip()
 
     def load_script(self, path):
         self._script_tble = np.loadtxt(path, delimiter=',', dtype=str)
+
+        if self._script_tble.ndim > 1:
+            #append t/f flags for each word
+            is_active = np.array(['active'])
+            is_active = np.append(is_active, np.ones(len(self._script_tble)-1, dtype=int))
+            is_active = is_active[..., np.newaxis]
+
+            self._script_tble = np.hstack([self._script_tble, is_active])
+
         self._script_tble_to_html()
         self.scriptChanged.signal.emit()
 
@@ -58,17 +74,59 @@ class ScriptModel(QObject):
         return len(self._script_tble)-2 #return last word index, -2 to account for header
 
     def mark_selection(self, cursor_pos_1, cursor_pos_2):
-        if cursor_pos_2 > cursor_pos_1:
+        if cursor_pos_1 > cursor_pos_2:
             self.mark_selection(cursor_pos_2, cursor_pos_1)
+            return
 
         index_start = self._get_tble_index_from_cursor(cursor_pos_1)
         index_stop  = self._get_tble_index_from_cursor(cursor_pos_2)
 
         print(self._script_tble[index_start+1:index_stop+2,0])
 
+        for index in range(index_start+1, index_stop+2):
+            is_active = self._script_tble[index, 4].astype(int)
+
+            print("active?", is_active)
+
+            if is_active:
+                self._script_tble[index, 4] = '0'
+            else:
+                self._script_tble[index, 4] = '1'
+
+        self._script_tble_to_html()
+
+        self.scriptChanged.signal.emit()
+
+class ScriptEditor(QTextEdit):
+    def __init__(self):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setCursor(Qt.ArrowCursor)
+        self.viewport().setCursor(Qt.PointingHandCursor)
+
+        self.script_model = ScriptModel()
+        self.script_model.scriptChanged.signal.connect(self._script_change)
+
+    @Slot(QMouseEvent)
+    def mouseReleaseEvent(self, event):
+        # sets position of anchor to the position of the 2nd cursor, resetting selection after
+        # mouse release
+        pos_anchor = self.textCursor().anchor()
+        pos_cursor = self.textCursor().position()
+
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(pos_cursor)
+
+        self.setTextCursor(new_cursor)
+
+        self.script_model.mark_selection(pos_anchor, pos_cursor)
+        self.setHtml(self.script_model.get_script_html())
+
+    @Slot()
+    def _script_change(self):
+        self.setHtml(self.script_model.get_script_html())
 
 class MainWindow(QMainWindow):
-
     def __init__(self):
         super().__init__()
 
@@ -84,8 +142,8 @@ class MainWindow(QMainWindow):
 
         self._files_model = QStringListModel()
 
-        self._script_model = ScriptModel()
-        self._script_model.scriptChanged.signal.connect(self._script_change)
+        #self._script_model = ScriptModel()
+        #self._script_model.scriptChanged.signal.connect(self._script_change)
         # --
         
         # -- File management --
@@ -111,31 +169,23 @@ class MainWindow(QMainWindow):
         self._video_widget.setSizePolicy(self._sp_video)
         # --
 
-        # -- Script edit widgets --
-        #self._script_navigator = QTextBrowser()
-        self._script_editor = QTextEdit()
+        # -- Script edit --
+        self._script_editor = ScriptEditor()
+        #self._script_editor.script_model.scriptChanged.signal.connect(self._script_change)
 
-        #self._script_navigator.setPlainText("Hello this is an example text.")
-        self._script_editor.setReadOnly(True)
-        #self._script_editor.setHtml('Hello this is an <span style="background-color:rgba(255,200,0,0.4)">example</span> text.')
-        #self._script_editor.setHtml('Hello this is an example text.')
-        self._script_editor.setCursor(Qt.ArrowCursor)
-        self._script_editor.viewport().setCursor(Qt.PointingHandCursor)
         self._sp_editor = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self._script_editor.setSizePolicy(self._sp_editor)
-        self._script_editor.cursorPositionChanged.connect(self._script_cursor_change)
+        #self._script_editor.cursorPositionChanged.connect(self._script_cursor_change)
         # --
 
         # -- Layout widgets --
         self._window_main = QWidget()
         self._groupbox_files = QGroupBox("Projects and Files")
         self._sp_files = QSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        #self._sp_files.setHorizontalStretch(1)
         self._groupbox_files.setSizePolicy(self._sp_files)
 
         self._window_cutting = QWidget()
         self._sp_cutting = QSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        #self._sp_cutting.setHorizontalStretch(5)
         self._window_cutting.setSizePolicy(self._sp_cutting)
 
         self._window_scripts = QWidget()
@@ -145,12 +195,10 @@ class MainWindow(QMainWindow):
         self._layout_outer = QHBoxLayout(self._window_main)
         self._layout_files = QVBoxLayout(self._groupbox_files)
         self._layout_cutting = QVBoxLayout(self._window_cutting)
-        #self._layout_scripts = QHBoxLayout(self._window_scripts)
 
         self._layout_outer.setContentsMargins(5, 5, 5, 5)
         self._layout_files.setContentsMargins(5, 5, 5, 5)
         self._layout_cutting.setContentsMargins(5, 5, 5, 5)
-        #self._layout_scripts.setContentsMargins(5, 5, 5, 5)
         
         self._groupbox_files.setLayout(self._layout_files)
 
@@ -162,10 +210,6 @@ class MainWindow(QMainWindow):
 
         self._layout_cutting.addWidget(self._video_widget)
         self._layout_cutting.addWidget(self._script_editor)
-        #self._layout_cutting.addWidget(self._window_scripts)
-
-        #self._layout_scripts.addWidget(self._script_navigator)
-        #self._layout_scripts.addWidget(self._script_editor)
 
         self.setCentralWidget(self._window_main)
         # --
@@ -191,7 +235,7 @@ class MainWindow(QMainWindow):
 
             script_media = self._proj_tree.get_projects()[project_index].get_media('script/full/csv')
             script_path = script_media.get_file_paths()[index]
-            self._script_model.load_script(script_path)
+            self._script_editor.script_model.load_script(script_path)
 
             #self._script_editor.setHtml(self._script_model.get_script_html())
 
@@ -199,17 +243,17 @@ class MainWindow(QMainWindow):
             self._player.play()
             self._player.pause()
 
-    @Slot()
-    def _script_cursor_change(self):
-        anchor = self._script_editor.textCursor().anchor()
-        position = self._script_editor.textCursor().position()
+    #@Slot()
+    #def _script_cursor_change(self):
+    #    anchor = self._script_editor.textCursor().anchor()
+    #    position = self._script_editor.textCursor().position()
 
-        #print(anchor, position)
-        self._script_model.mark_selection(anchor, position)
+    #    #print(anchor, position)
+    #    self._script_model.mark_selection(anchor, position)
 
-    @Slot()
-    def _script_change(self):
-        self._script_editor.setHtml(self._script_model.get_script_html())
+    #@Slot()
+    #def _script_change(self):
+    #    self._script_editor.setHtml(self._script_model.get_script_html())
 
     @Slot(QKeyEvent)
     def keyPressEvent(self, event):
